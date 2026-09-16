@@ -7,16 +7,20 @@
 #
 # Env overrides:
 #   LOCAL_KMS_REPO         GitHub "owner/repo" to install from (default: violetbuse/local_kms)
-#   LOCAL_KMS_INSTALL_DIR  Directory to install the binary into (default: $HOME/.local/bin)
+#   LOCAL_KMS_INSTALL_DIR  Directory to install the binary into (default: /usr/local/bin)
+#
+# This script never modifies shell config files. It installs into a directory that's
+# normally already on PATH; if that directory isn't on PATH, it just prints a warning.
 
 set -euo pipefail
 
 REPO="${LOCAL_KMS_REPO:-violetbuse/local_kms}"
 BIN_NAME="local_kms"
-INSTALL_DIR="${LOCAL_KMS_INSTALL_DIR:-$HOME/.local/bin}"
+INSTALL_DIR="${LOCAL_KMS_INSTALL_DIR:-/usr/local/bin}"
 VERSION_FILE="$INSTALL_DIR/.$BIN_NAME.version"
 
 log() { printf '==> %s\n' "$*"; }
+warn() { printf 'warning: %s\n' "$*" >&2; }
 err() { printf 'error: %s\n' "$*" >&2; exit 1; }
 
 command -v curl >/dev/null 2>&1 || err "curl is required but not found"
@@ -62,8 +66,8 @@ if [ -f "$VERSION_FILE" ]; then
     installed_tag="$(cat "$VERSION_FILE")"
 fi
 
-if [ "$installed_tag" = "$latest_tag" ] && command -v "$BIN_NAME" >/dev/null 2>&1; then
-    log "$BIN_NAME $latest_tag is already installed and up to date ($(command -v "$BIN_NAME"))"
+if [ "$installed_tag" = "$latest_tag" ] && [ -x "$INSTALL_DIR/$BIN_NAME" ]; then
+    log "$BIN_NAME $latest_tag is already installed and up to date ($INSTALL_DIR/$BIN_NAME)"
     exit 0
 fi
 
@@ -88,51 +92,31 @@ tar -xzf "$tmp_dir/$asset" -C "$tmp_dir"
 extracted_bin="$tmp_dir/$BIN_NAME-$target/$BIN_NAME"
 [ -f "$extracted_bin" ] || err "downloaded archive did not contain the expected binary"
 
-# ---- install ----
+# ---- install (using sudo only if the install directory isn't writable) ----
 
-mkdir -p "$INSTALL_DIR" || err "could not create install directory: $INSTALL_DIR"
-[ -w "$INSTALL_DIR" ] || err "install directory is not writable: $INSTALL_DIR (try setting LOCAL_KMS_INSTALL_DIR to a writable path, or re-run with elevated permissions)"
+SUDO=""
+if [ -d "$INSTALL_DIR" ] && [ -w "$INSTALL_DIR" ]; then
+    :
+elif [ "$(id -u)" -eq 0 ]; then
+    :
+elif command -v sudo >/dev/null 2>&1; then
+    SUDO="sudo"
+    log "$INSTALL_DIR requires elevated privileges; you may be prompted for your password"
+else
+    err "install directory is not writable and sudo is not available: $INSTALL_DIR (set LOCAL_KMS_INSTALL_DIR to a writable directory instead)"
+fi
 
-install -m 755 "$extracted_bin" "$INSTALL_DIR/$BIN_NAME"
-echo "$latest_tag" > "$VERSION_FILE"
+$SUDO mkdir -p "$INSTALL_DIR" || err "could not create install directory: $INSTALL_DIR"
+$SUDO install -m 755 "$extracted_bin" "$INSTALL_DIR/$BIN_NAME"
+printf '%s\n' "$latest_tag" | $SUDO tee "$VERSION_FILE" >/dev/null
 
 log "Installed $BIN_NAME $latest_tag to $INSTALL_DIR/$BIN_NAME"
 
-# ---- PATH setup ----
+# ---- PATH check (informational only; this script never edits shell configs) ----
 
 case ":$PATH:" in
-    *":$INSTALL_DIR:"*)
-        ;;
-    *)
-        shell_name="$(basename "${SHELL:-}")"
-        case "$shell_name" in
-            zsh) rc_file="$HOME/.zshrc"; path_line="export PATH=\"$INSTALL_DIR:\$PATH\"" ;;
-            bash)
-                if [ "$os" = "Darwin" ] && [ -f "$HOME/.bash_profile" ]; then
-                    rc_file="$HOME/.bash_profile"
-                else
-                    rc_file="$HOME/.bashrc"
-                fi
-                path_line="export PATH=\"$INSTALL_DIR:\$PATH\""
-                ;;
-            fish) rc_file="$HOME/.config/fish/config.fish"; path_line="set -gx PATH \"$INSTALL_DIR\" \$PATH" ;;
-            *) rc_file="" ;;
-        esac
-
-        if [ -n "$rc_file" ]; then
-            mkdir -p "$(dirname "$rc_file")"
-            if [ ! -f "$rc_file" ] || ! grep -qF "$INSTALL_DIR" "$rc_file"; then
-                {
-                    echo ""
-                    echo "# added by local_kms install.sh"
-                    echo "$path_line"
-                } >> "$rc_file"
-                log "Added $INSTALL_DIR to PATH in $rc_file (restart your shell, or run: source $rc_file)"
-            fi
-        else
-            log "$INSTALL_DIR is not on your PATH. Add it manually, e.g.: export PATH=\"$INSTALL_DIR:\$PATH\""
-        fi
-        ;;
+    *":$INSTALL_DIR:"*) ;;
+    *) warn "$INSTALL_DIR is not on your PATH. Add it yourself, e.g.: export PATH=\"$INSTALL_DIR:\$PATH\"" ;;
 esac
 
-log "Done. Run '$BIN_NAME' to start the server (after your PATH is updated, if this is a fresh install)."
+log "Done. Run '$BIN_NAME' to start the server."
