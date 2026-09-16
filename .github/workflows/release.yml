@@ -1,0 +1,96 @@
+name: CI and Release
+
+on:
+  push:
+    branches: [master, main]
+    tags: ["v*.*.*"]
+  pull_request:
+    branches: [master, main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --locked
+
+  build:
+    name: Build (${{ matrix.target }})
+    needs: test
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            cross_cc: aarch64-linux-gnu-gcc
+            cross_ar: aarch64-linux-gnu-ar
+            apt_package: gcc-aarch64-linux-gnu
+          - target: aarch64-apple-darwin
+            os: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install cross-compilation toolchain
+        if: matrix.apt_package
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ${{ matrix.apt_package }}
+
+      - name: Build
+        env:
+          CC_aarch64_unknown_linux_gnu: ${{ matrix.cross_cc }}
+          AR_aarch64_unknown_linux_gnu: ${{ matrix.cross_ar }}
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: ${{ matrix.cross_cc }}
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Package
+        run: |
+          out="local_kms-${{ matrix.target }}"
+          mkdir "$out"
+          cp "target/${{ matrix.target }}/release/local_kms" "$out/"
+          cp README.md "$out/" 2>/dev/null || true
+          tar -czf "$out.tar.gz" "$out"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: local_kms-${{ matrix.target }}
+          path: local_kms-${{ matrix.target }}.tar.gz
+          if-no-files-found: error
+
+  release:
+    name: Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: local_kms-*
+          path: dist
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v3
+        with:
+          files: dist/*.tar.gz
+          generate_release_notes: true
